@@ -4,17 +4,16 @@ import React, {
   useRef,
   forwardRef,
   useImperativeHandle,
+  useCallback,
 } from "react";
 import { Box } from "@mui/material";
 import TextTool from "./TextTool";
 import useSocket from "../hooks/useSocket";
 import {
-  resizeCanvas,
   getCursorPosition,
   clearCanvas,
   drawRect,
   drawCircle,
-  drawText,
   loadImageToCanvas,
   canvasToDataURL,
 } from "../utils/canvasUtils";
@@ -36,6 +35,9 @@ const Canvas = forwardRef(
   ) => {
     const canvasRef = useRef(null);
     const contextRef = useRef(null);
+    const initialImageDataRef = useRef(initialImageData);
+    const colorRef = useRef(color);
+    const widthRef = useRef(width);
     const [isDrawing, setIsDrawing] = useState(false);
     const [elements, setElements] = useState(initialElements || []);
     const [undoStack, setUndoStack] = useState([]);
@@ -47,6 +49,7 @@ const Canvas = forwardRef(
     const [eraserPos, setEraserPos] = useState(null); // {x, y}
     const [eraserRect, setEraserRect] = useState(null); // {x1, y1, x2, y2}
     const [editingTextId, setEditingTextId] = useState(null);
+    const [pendingText, setPendingText] = useState("");
 
     // Add new state for text formatting
     const [textFormatting, setTextFormatting] = useState({
@@ -63,13 +66,12 @@ const Canvas = forwardRef(
     const [dragging, setDragging] = useState({
       isDragging: false,
       elementId: null,
-      // Store the initial mouse coordinates relative to the element's origin
-      // This is crucial for smooth dragging without jumps
       initialMouseX: 0,
       initialMouseY: 0,
-      // Store the original position of the element when drag starts
       originalElementX: 0,
       originalElementY: 0,
+      originalElementX2: 0, // <-- use these consistently
+      originalElementY2: 0,
     });
     // Removed hoveredElementId as it's less relevant with a dedicated drag tool
 
@@ -78,714 +80,44 @@ const Canvas = forwardRef(
       emitDrawStart,
       emitDrawMove,
       emitDrawEnd,
-      emitAddText,
-      emitAddShape,
       onEvent,
+      emitSyncElements,
     } = useSocket();
 
-    // Initialize canvas
-    useEffect(() => {
-      const canvas = canvasRef.current;
-      const parent = canvas.parentElement;
+    // --- Undo/Redo logic using undoStack and redoStack ---
 
-      // Set canvas size to match parent size in pixels
-      canvas.width = parent.clientWidth;
-      canvas.height = parent.clientHeight;
-
-      const context = canvas.getContext("2d");
-      context.lineCap = "round";
-      context.lineJoin = "round"; // Add this for smoother line joins
-      context.strokeStyle = color;
-      context.lineWidth = width;
-
-      // Disable image smoothing for sharper lines
-      context.imageSmoothingEnabled = false;
-
-      contextRef.current = context;
-
-      // Handle window resize
-      const handleResize = () => {
-        const prevData = canvas.toDataURL();
-        canvas.width = parent.clientWidth;
-        canvas.height = parent.clientHeight;
-
-        // Restore context properties after resize
-        context.lineCap = "round";
-        context.lineJoin = "round";
-        context.strokeStyle = color;
-        context.lineWidth = width;
-        context.imageSmoothingEnabled = false;
-
-        // Redraw canvas
-        const img = new Image();
-        img.onload = () => {
-          context.drawImage(img, 0, 0);
-          redrawCanvas();
-        };
-        img.src = prevData;
-      };
-
-      window.addEventListener("resize", handleResize);
-
-      // Load initial data if available
-      if (initialImageData) {
-        loadImageToCanvas(context, initialImageData)
-          .then(() => {
-            // loaded
-          })
-          .catch((err) => {
-            console.error("Error loading initial whiteboard image:", err);
-          });
-      }
-
-      return () => {
-        window.removeEventListener("resize", handleResize);
-      };
-    }, []);
-
-    // Update stroke style when color changes
-    useEffect(() => {
-      if (contextRef.current) {
-        contextRef.current.strokeStyle = color;
-      }
-    }, [color]);
-
-    // Update line width when width changes
-    useEffect(() => {
-      if (contextRef.current) {
-        contextRef.current.lineWidth = width;
-      }
-    }, [width]);
-
-    // Set up socket event listeners for drawing
-    useEffect(() => {
-      // Other user started drawing
-      const drawStartCleanup = onEvent("draw-start", (data) => {
-        const { x, y, color, width } = data;
-        const ctx = contextRef.current;
-
-        ctx.strokeStyle = color;
-        ctx.lineWidth = width;
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-      });
-
-      // Other user is drawing
-      const drawMoveCleanup = onEvent("draw-move", (data) => {
-        const { x, y } = data;
-        const ctx = contextRef.current;
-
-        ctx.lineTo(x, y);
-        ctx.stroke();
-      });
-
-      // Other user stopped drawing
-      const drawEndCleanup = onEvent("draw-end", () => {
-        contextRef.current.closePath();
-      });
-
-      // Other user added text (Note: This might need more sophisticated handling if rich text is introduced)
-      const addTextCleanup = onEvent("add-text", (data) => {
-        const { text, x, y, fontSize, color, fontFamily, fontStyle } = data;
-        drawText(
-          contextRef.current,
-          text,
-          x,
-          y,
-          color,
-          fontSize,
-          fontFamily,
-          fontStyle
-        );
-      });
-
-      // Other user added shape
-      const addShapeCleanup = onEvent("add-shape", (data) => {
-        const { type, x, y, width, height, color } = data;
-
-        if (type === "rectangle") {
-          drawRect(contextRef.current, x, y, width, height, color, 2);
-        } else if (type === "circle") {
-          const radius = Math.sqrt(width * width + height * height) / 2;
-          drawCircle(
-            contextRef.current,
-            x + width / 2,
-            y + height / 2,
-            radius,
-            color,
-            2
-          );
+    const handleUndo = useCallback(() => {
+      setUndoStack((prevUndoStack) => {
+        if (prevUndoStack.length === 0) return prevUndoStack;
+        const prevState = prevUndoStack[prevUndoStack.length - 1];
+        setRedoStack((prevRedoStack) => [elements, ...prevRedoStack]);
+        setElements(prevState);
+        if (roomId && emitSyncElements) {
+          emitSyncElements(roomId, prevState);
         }
+        // Explicitly return the new undoStack (without the last state)
+        return prevUndoStack.slice(0, -1);
       });
+    }, [roomId, emitSyncElements, elements]);
 
-      // Listen for element updates (for dragging)
-      const updateElementCleanup = onEvent("update-element", (data) => {
-        const { element } = data;
-        setElements((prev) =>
-          prev.map((el) => (el.id === element.id ? element : el))
-        );
+    const handleRedo = useCallback(() => {
+      setRedoStack((prevRedoStack) => {
+        if (prevRedoStack.length === 0) return prevRedoStack;
+        const nextState = prevRedoStack[0];
+        setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+        setElements(nextState);
+        if (roomId && emitSyncElements) {
+          emitSyncElements(roomId, nextState);
+        }
+        // Explicitly return the new redoStack (without the first state)
+        return prevRedoStack.slice(1);
       });
+    }, [roomId, emitSyncElements, elements]);
 
-      return () => {
-        drawStartCleanup();
-        drawMoveCleanup();
-        drawEndCleanup();
-        addTextCleanup();
-        addShapeCleanup();
-        updateElementCleanup();
-      };
-    }, [onEvent]);
-
-    // Listen for add-element events from other users
-    useEffect(() => {
-      if (!socket) return;
-      const cleanup = onEvent("add-element", (data) => {
-        const { element } = data;
-        // Avoid duplicate if this element already exists (by id)
-        setElements((prev) => {
-          if (element.id && prev.some((el) => el.id === element.id))
-            return prev;
-          return [...prev, element];
-        });
-      });
-      return cleanup;
-    }, [socket, onEvent]);
-
-    // Add keyboard shortcuts for undo/redo
-    useEffect(() => {
-      const handleKeyDown = (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === "z") {
-          e.preventDefault();
-          handleUndo();
-        } else if (
-          (e.ctrlKey || e.metaKey) &&
-          (e.key === "y" || (e.shiftKey && e.key === "z"))
-        ) {
-          e.preventDefault();
-          handleRedo();
-        }
-      };
-      window.addEventListener("keydown", handleKeyDown);
-      return () => window.removeEventListener("keydown", handleKeyDown);
-    }, []); // only on mount
-
-    // Expose methods to parent component
-    useImperativeHandle(ref, () => ({
-      clearCanvas: () => {
-        clearCanvas(contextRef.current, canvasRef.current);
-        setElements([]);
-        setUndoStack([]);
-        setRedoStack([]);
-      },
-      getCanvasImage: () => {
-        return canvasToDataURL(canvasRef.current);
-      },
-      getElements: () => {
-        return elements;
-      },
-      undo: handleUndo,
-      redo: handleRedo,
-      getCanvas: () => {
-        return canvasRef.current;
-      },
-    }));
-
-    // Notify parent about undo/redo availability
-    useEffect(() => {
-      if (typeof onStackChange === "function") {
-        onStackChange({
-          canUndo: elements.length > 0,
-          canRedo: redoStack.length > 0,
-        });
-      }
-    }, [elements, redoStack, onStackChange]);
-
-    // Always redraw canvas after elements change
-    useEffect(() => {
-      redrawCanvas();
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [elements]);
-
-    // Undo/Redo handlers
-    const handleUndo = () => {
-      if (elements.length === 0) return;
-      const newElements = [...elements];
-      const popped = newElements.pop();
-      setUndoStack(newElements);
-      setRedoStack((prev) => [...prev, popped]);
-      setElements(newElements);
-    };
-
-    const handleRedo = () => {
-      if (redoStack.length === 0) return;
-      const newRedoStack = [...redoStack];
-      const restored = newRedoStack.pop();
-      const newElements = [...elements, restored];
-      setUndoStack(newElements);
-      setRedoStack(newRedoStack);
-      setElements(newElements);
-    };
-
-    // Save to undo stack on every new element
-    useEffect(() => {
-      if (elements.length > 0) {
-        setUndoStack(elements);
-      }
-    }, [elements]);
-
-    // Add new helper functions for line and arrow
-    const drawLine = (ctx, x1, y1, x2, y2, color, width) => {
-      ctx.save();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-      ctx.restore();
-    };
-
-    const drawArrow = (ctx, x1, y1, x2, y2, color, width) => {
-      ctx.save();
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
-      ctx.lineWidth = width;
-
-      // Draw line
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-
-      // Draw arrow head
-      const headLength = 15;
-      const angle = Math.atan2(y2 - y1, x2 - x1);
-      ctx.beginPath();
-      ctx.moveTo(x2, y2);
-      ctx.lineTo(
-        x2 - headLength * Math.cos(angle - Math.PI / 6),
-        y2 - headLength * Math.sin(angle - Math.PI / 6)
-      );
-      ctx.lineTo(
-        x2 - headLength * Math.cos(angle + Math.PI / 6),
-        y2 - headLength * Math.sin(angle + Math.PI / 6)
-      );
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    };
-
-    const fillShape = (ctx, element, color) => {
-      ctx.save();
-      ctx.fillStyle = color;
-
-      if (element.type === "rectangle") {
-        ctx.fillRect(element.x, element.y, element.width, element.height);
-      } else if (element.type === "circle") {
-        ctx.beginPath();
-        ctx.arc(element.x, element.y, element.radius, 0, 2 * Math.PI);
-        ctx.fill();
-      }
-      ctx.restore();
-    };
-
-    // Mouse events for drawing
-    const startDrawing = (event) => {
-      const { x, y } = getCursorPosition(canvasRef.current, event);
-
-      if (tool === "pen") {
-        contextRef.current.beginPath();
-        contextRef.current.moveTo(x, y);
-        setIsDrawing(true);
-        setCurrentPath([{ x, y }]);
-        emitDrawStart(roomId, x, y, color, width);
-        return;
-      }
-
-      if (tool === "text") {
-        setStartX(x);
-        setStartY(y);
-        setIsDrawing(true);
-        setPreviewShape({
-          type: "text-area",
-          x1: x,
-          y1: y,
-          x2: x,
-          y2: y,
-        });
-        return;
-      }
-
-      if (tool === "rectangle" || tool === "circle") {
-        setStartX(x);
-        setStartY(y);
-        setIsDrawing(true);
-        setPreviewShape({
-          type: tool,
-          x1: x,
-          y1: y,
-          x2: x,
-          y2: y,
-          color,
-          width,
-        });
-        return;
-      }
-
-      if (tool === "eraser") {
-        setIsDrawing(true);
-        setStartX(x);
-        setStartY(y);
-        setEraserRect({ x1: x, y1: y, x2: x, y2: y });
-        return;
-      }
-
-      if (tool === "paint") {
-        // Find shape under cursor and fill it
-        const clickedElement = elements.findLast((el) => {
-          if (el.type === "rectangle") {
-            return (
-              x >= el.x &&
-              x <= el.x + el.width &&
-              y >= el.y &&
-              y <= el.y + el.height
-            );
-          } else if (el.type === "circle") {
-            const dx = x - el.x;
-            const dy = y - el.y;
-            return Math.sqrt(dx * dx + dy * dy) <= el.radius;
-          }
-          return false;
-        });
-
-        if (clickedElement) {
-          const newElement = {
-            ...clickedElement,
-            id: Date.now() + Math.random(),
-            fill: color,
-          };
-          setElements((prev) => [...prev, newElement]);
-          if (socket) {
-            socket.emit("add-element", { roomId, element: newElement });
-          }
-        }
-        return;
-      }
-
-      if (tool === "line" || tool === "arrow") {
-        setStartX(x);
-        setStartY(y);
-        setIsDrawing(true);
-        setPreviewShape({
-          type: tool,
-          x1: x,
-          y1: y,
-          x2: x,
-          y2: y,
-          color,
-          width: contextRef.current.lineWidth,
-        });
-        return;
-      }
-    };
-
-    const draw = (event) => {
-      if (!isDrawing) {
-        if (tool === "eraser") {
-          // Show eraser circle even if not drawing
-          const { x, y } = getCursorPosition(canvasRef.current, event);
-          setEraserPos({ x, y });
-        }
-        return;
-      }
-      const { x, y } = getCursorPosition(canvasRef.current, event);
-
-      if (tool === "pen") {
-        contextRef.current.lineTo(x, y);
-        contextRef.current.stroke();
-        setCurrentPath((prev) => [...prev, { x, y }]);
-        emitDrawMove(roomId, x, y);
-        return;
-      }
-
-      if (tool === "text") {
-        setPreviewShape((prev) =>
-          prev
-            ? { ...prev, x2: x, y2: y }
-            : { type: "text-area", x1: startX, y1: startY, x2: x, y2: y }
-        );
-        redrawCanvas();
-        return;
-      }
-
-      if (tool === "rectangle" || tool === "circle") {
-        setPreviewShape((prev) =>
-          prev
-            ? { ...prev, x2: x, y2: y }
-            : { type: tool, x1: startX, y1: startY, x2: x, y2: y, color, width }
-        );
-        redrawCanvas();
-        return;
-      }
-
-      if (tool === "eraser") {
-        setEraserRect((prev) =>
-          prev
-            ? { ...prev, x2: x, y2: y }
-            : { x1: startX, y1: startY, x2: x, y2: y }
-        );
-        redrawCanvas();
-        return;
-      }
-
-      if (tool === "line" || tool === "arrow") {
-        setPreviewShape((prev) => ({
-          ...prev,
-          x2: x,
-          y2: y,
-        }));
-        redrawCanvas();
-        return;
-      }
-    };
-
-    const stopDrawing = (event) => {
-      if (!isDrawing) return;
-
-      if (tool === "text") {
-        const { x, y } = getCursorPosition(canvasRef.current, event);
-        setIsDrawing(false);
-        // Calculate area
-        const x1 = startX;
-        const y1 = startY;
-        const x2 = x;
-        const y2 = y;
-        const left = Math.min(x1, x2);
-        const top = Math.min(y1, y2);
-        const widthArea = Math.abs(x2 - x1);
-        const heightArea = Math.abs(y2 - y1);
-        // Add a new text element with empty text and set it to editing
-        const id = Date.now();
-        const newTextElement = {
-          id,
-          type: "text",
-          x: left,
-          y: top,
-          width: widthArea,
-          height: heightArea,
-          text: "",
-          color,
-          fontSize: `${Math.max(14, width * 5)}px`, // Use tool width as a factor for initial font size
-          fontFamily: textFormatting.fontFamily,
-          fontStyle: textFormatting.fontStyle,
-        };
-        setElements((prev) => [...prev, newTextElement]);
-        setEditingTextId(id);
-        setPreviewShape(null);
-        if (socket) {
-          socket.emit("add-element", { roomId, element: newTextElement });
-        }
-        return;
-      }
-
-      if (tool === "rectangle" || tool === "circle") {
-        const { x, y } = getCursorPosition(canvasRef.current, event);
-        const w = x - startX;
-        const h = y - startY;
-
-        if (tool === "rectangle") {
-          const newElement = {
-            id: Date.now() + Math.random(),
-            type: "rectangle",
-            x: startX,
-            y: startY,
-            width: w,
-            height: h,
-            color,
-            lineWidth: contextRef.current.lineWidth,
-          };
-          setElements((prev) => {
-            setRedoStack([]);
-            if (socket)
-              socket.emit("add-element", { roomId, element: newElement });
-            return [...prev, newElement];
-          });
-        } else if (tool === "circle") {
-          const radius = Math.sqrt(w * w + h * h) / 2;
-          const centerX = startX + w / 2;
-          const centerY = startY + h / 2;
-
-          const newElement = {
-            id: Date.now() + Math.random(),
-            type: "circle",
-            x: centerX,
-            y: centerY,
-            radius,
-            color,
-            lineWidth: contextRef.current.lineWidth,
-          };
-          setElements((prev) => {
-            setRedoStack([]);
-            if (socket)
-              socket.emit("add-element", { roomId, element: newElement });
-            return [...prev, newElement];
-          });
-        }
-        setIsDrawing(false);
-        setPreviewShape(null);
-        return;
-      }
-
-      if (tool === "eraser") {
-        const { x, y } = getCursorPosition(canvasRef.current, event);
-        const x1 = startX;
-        const y1 = startY;
-        const x2 = x;
-        const y2 = y;
-        const left = Math.min(x1, x2);
-        const top = Math.min(y1, y2);
-        const right = Math.max(x1, x2);
-        const bottom = Math.max(y1, y2);
-
-        // Instead of removing elements, erase only the area by drawing a white rectangle
-        const eraseElement = {
-          id: Date.now() + Math.random(),
-          type: "erase-rect",
-          x: left,
-          y: top,
-          width: right - left,
-          height: bottom - top,
-        };
-        setElements((prev) => {
-          setRedoStack([]);
-          if (socket)
-            socket.emit("add-element", { roomId, element: eraseElement });
-          return [...prev, eraseElement];
-        });
-
-        setIsDrawing(false);
-        setEraserRect(null);
-        setEraserPos(null);
-        return;
-      }
-
-      if (tool === "pen") {
-        contextRef.current.closePath();
-        emitDrawEnd(roomId);
-
-        const newElement = {
-          id: Date.now() + Math.random(), // unique id
-          type: "path",
-          color,
-          width: contextRef.current.lineWidth,
-          points: currentPath,
-        };
-        setElements((prev) => {
-          setRedoStack([]);
-          // Emit to others
-          if (socket)
-            socket.emit("add-element", { roomId, element: newElement });
-          return [...prev, newElement];
-        });
-        setCurrentPath([]);
-        setIsDrawing(false);
-        return;
-      }
-
-      if (tool === "line" || tool === "arrow") {
-        const { x, y } = getCursorPosition(canvasRef.current, event);
-        const newElement = {
-          id: Date.now() + Math.random(),
-          type: tool,
-          x1: startX,
-          y1: startY,
-          x2: x,
-          y2: y,
-          color,
-          width: contextRef.current.lineWidth,
-        };
-
-        setElements((prev) => [...prev, newElement]);
-        if (socket) {
-          socket.emit("add-element", { roomId, element: newElement });
-        }
-        setIsDrawing(false);
-        setPreviewShape(null);
-        return;
-      }
-    };
-
-    // Update text formatting state handler
-    const handleTextFormatting = (updates) => {
-      setTextFormatting((prev) => ({
-        ...prev,
-        ...updates,
-      }));
-
-      if (editingTextId) {
-        setElements((prev) =>
-          prev.map((el) =>
-            el.id === editingTextId ? { ...el, ...updates } : el
-          )
-        );
-      }
-    };
-
-    // Handle text input change for inline editing
-    const handleTextChange = (id, value) => {
-      setElements((prev) =>
-        prev.map((el) => (el.id === id ? { ...el, text: value } : el))
-      );
-    };
-
-    // End editing on blur or Enter
-    const handleTextBlur = () => {
-      setEditingTextId(null);
-      // Emit to others
-      const el = elements.find((e) => e.id === editingTextId);
-      if (el && socket) {
-        socket.emit("add-element", { roomId, element: el });
-      }
-    };
-
-    // Eraser logic: remove paths/text/shapes under the cursor
-    const eraseAt = (x, y) => {
-      setElements((prev) => {
-        // Remove any element that intersects with eraser circle
-        const filtered = prev.filter((el) => {
-          if (el.type === "path" && el.points && el.points.length > 1) {
-            // If any point in the path is within eraser radius, remove this path
-            return !el.points.some(
-              (pt) => Math.hypot(pt.x - x, pt.y - y) < ERASER_RADIUS
-            );
-          }
-          if (el.type === "text") {
-            // Remove text if eraser is near its anchor
-            return Math.hypot(el.x - x, el.y - y) > ERASER_RADIUS;
-          }
-          if (el.type === "rectangle") {
-            // Remove if eraser is inside rectangle
-            return !(
-              x >= el.x &&
-              x <= el.x + el.width &&
-              y >= el.y &&
-              y <= el.y + el.height
-            );
-          }
-          if (el.type === "circle") {
-            // Remove if eraser is inside circle
-            return Math.hypot(el.x - x, el.y - y) > (el.radius || 0);
-          }
-          return true;
-        });
-        if (filtered.length !== prev.length) setRedoStack([]);
-        return filtered;
-      });
-    };
-
-    // Redraw all elements on canvas
-    const redrawCanvas = () => {
+    // Fix redrawCanvas with useCallback
+    const redrawCanvas = useCallback(() => {
       const ctx = contextRef.current;
+      if (!ctx) return;
       clearCanvas(ctx, canvasRef.current);
 
       elements.forEach((element) => {
@@ -988,7 +320,9 @@ const Canvas = forwardRef(
               previewShape.width
             );
             break;
-          // ...existing preview cases...
+          default:
+            // No default preview shape
+            break;
         }
       }
 
@@ -1018,24 +352,624 @@ const Canvas = forwardRef(
         ctx.setLineDash([]);
         ctx.restore();
       }
+    }, [elements, editingTextId, previewShape, eraserRect, eraserPos, tool]); // Add dependencies
+
+    // Initialize canvas - now without color/width dependencies
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      const parent = canvas.parentElement;
+
+      // Set canvas size to match parent size in pixels
+      canvas.width = parent.clientWidth;
+      canvas.height = parent.clientHeight;
+
+      const context = canvas.getContext("2d");
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.strokeStyle = colorRef.current;
+      context.lineWidth = widthRef.current;
+      context.imageSmoothingEnabled = false;
+
+      contextRef.current = context;
+
+      // Handle window resize
+      const handleResize = () => {
+        const prevData = canvas.toDataURL();
+        canvas.width = parent.clientWidth;
+        canvas.height = parent.clientHeight;
+
+        // Restore context properties after resize
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        context.strokeStyle = colorRef.current;
+        context.lineWidth = widthRef.current;
+        context.imageSmoothingEnabled = false;
+
+        // Redraw canvas
+        const img = new Image();
+        img.onload = () => {
+          context.drawImage(img, 0, 0);
+          redrawCanvas();
+        };
+        img.src = prevData;
+      };
+
+      window.addEventListener("resize", handleResize);
+
+      // Load initial data if available
+      if (initialImageDataRef.current) {
+        loadImageToCanvas(context, initialImageDataRef.current)
+          .then(() => {
+            // loaded
+          })
+          .catch((err) => {
+            console.error("Error loading initial whiteboard image:", err);
+          });
+      }
+
+      return () => {
+        window.removeEventListener("resize", handleResize);
+      };
+    }, [redrawCanvas]); // No dependencies needed now
+
+    // Replace direct color/width effect with ref updates
+    useEffect(() => {
+      if (contextRef.current) {
+        contextRef.current.strokeStyle = colorRef.current;
+        contextRef.current.lineWidth = widthRef.current;
+      }
+    }, [color, width]);
+
+    // Update redrawCanvas to use refs
+    useEffect(() => {
+      redrawCanvas();
+    }, [redrawCanvas]);
+
+    // Set up socket event listeners for drawing
+    useEffect(() => {
+      // Other user started drawing
+      const drawStartCleanup = onEvent("draw-start", (data) => {
+        const { x, y, color, width } = data;
+        const ctx = contextRef.current;
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+      });
+
+      // Other user is drawing
+      const drawMoveCleanup = onEvent("draw-move", (data) => {
+        const { x, y } = data;
+        const ctx = contextRef.current;
+
+        ctx.lineTo(x, y);
+        ctx.stroke();
+      });
+
+      // Other user stopped drawing
+      const drawEndCleanup = onEvent("draw-end", () => {
+        contextRef.current.closePath();
+      });
+
+      // Other user added shape
+      const addShapeCleanup = onEvent("add-shape", (data) => {
+        const { type, x, y, width, height, color } = data;
+
+        if (type === "rectangle") {
+          drawRect(contextRef.current, x, y, width, height, color, 2);
+        } else if (type === "circle") {
+          const radius = Math.sqrt(width * width + height * height) / 2;
+          drawCircle(
+            contextRef.current,
+            x + width / 2,
+            y + height / 2,
+            radius,
+            color,
+            2
+          );
+        }
+      });
+
+      // Listen for element updates (for dragging)
+      const updateElementCleanup = onEvent("update-element", (data) => {
+        const { element } = data;
+        setElements((prev) =>
+          prev.map((el) => (el.id === element.id ? element : el))
+        );
+      });
+
+      const RedoUndoCleanup = onEvent("sync-elements", (data) => {
+        if (Array.isArray(data.elements)) {
+          setElements(data.elements);
+          setUndoStack([]); // Optional: clear undo/redo stacks to avoid conflicts
+          setRedoStack([]);
+        }
+      });
+
+      return () => {
+        drawStartCleanup();
+        drawMoveCleanup();
+        drawEndCleanup();
+        addShapeCleanup();
+        updateElementCleanup();
+        RedoUndoCleanup();
+      };
+    }, [onEvent]);
+
+    // Listen for add-element events from other users
+    useEffect(() => {
+      if (!socket) return;
+      const cleanup = onEvent("add-element", (data) => {
+        const { element } = data;
+        setElements((prev) => {
+          if (element.id && prev.some((el) => el.id === element.id))
+            return prev;
+          return [...prev, element];
+        });
+      });
+      return cleanup;
+    }, [socket, onEvent]);
+
+    // Separate keyboard shortcuts effect
+    useEffect(() => {
+      const handleKeyDown = (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+          e.preventDefault();
+          handleUndo();
+        } else if (
+          (e.ctrlKey || e.metaKey) &&
+          (e.key === "y" || (e.shiftKey && e.key === "z"))
+        ) {
+          e.preventDefault();
+          handleRedo();
+        }
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [handleUndo, handleRedo]);
+
+    // Expose methods to parent component
+    useImperativeHandle(ref, () => ({
+      clearCanvas: () => {
+        clearCanvas(contextRef.current, canvasRef.current);
+        setElements([]);
+        setUndoStack([]);
+        setRedoStack([]);
+      },
+      getCanvasImage: () => {
+        return canvasToDataURL(canvasRef.current);
+      },
+      getElements: () => {
+        return elements;
+      },
+      undo: handleUndo,
+      redo: handleRedo,
+      getCanvas: () => {
+        return canvasRef.current;
+      },
+    }));
+
+    // Notify parent about undo/redo availability
+    useEffect(() => {
+      if (typeof onStackChange === "function") {
+        onStackChange({
+          canUndo: undoStack.length > 0,
+          canRedo: redoStack.length > 0,
+        });
+      }
+    }, [undoStack, redoStack, onStackChange]);
+
+    // Always redraw canvas after elements change
+    useEffect(() => {
+      redrawCanvas();
+    }, [elements, redrawCanvas]);
+
+    // Add new helper functions for line and arrow
+    const drawLine = (ctx, x1, y1, x2, y2, color, width) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+      ctx.restore();
     };
 
-    // Mouse move for eraser preview even when not drawing
-    const handleMouseMove = (event) => {
+    const drawArrow = (ctx, x1, y1, x2, y2, color, width) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = width;
+
+      // Draw line
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+
+      // Draw arrow head
+      const headLength = 15;
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(
+        x2 - headLength * Math.cos(angle - Math.PI / 6),
+        y2 - headLength * Math.sin(angle - Math.PI / 6)
+      );
+      ctx.lineTo(
+        x2 - headLength * Math.cos(angle + Math.PI / 6),
+        y2 - headLength * Math.sin(angle + Math.PI / 6)
+      );
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    };
+
+    const fillShape = (ctx, element, color) => {
+      ctx.save();
+      ctx.fillStyle = color;
+
+      if (element.type === "rectangle") {
+        ctx.fillRect(element.x, element.y, element.width, element.height);
+      } else if (element.type === "circle") {
+        ctx.beginPath();
+        ctx.arc(element.x, element.y, element.radius, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+      ctx.restore();
+    };
+
+    // Mouse events for drawing
+    const startDrawing = (event) => {
+      const { x, y } = getCursorPosition(canvasRef.current, event);
+
+      if (tool === "pen") {
+        contextRef.current.beginPath();
+        contextRef.current.moveTo(x, y);
+        setIsDrawing(true);
+        setCurrentPath([{ x, y }]);
+        emitDrawStart(roomId, x, y, color, width);
+        return;
+      }
+
+      if (tool === "text") {
+        const { x, y } = getCursorPosition(canvasRef.current, event);
+        setIsDrawing(false);
+        setStartX(x);
+        setStartY(y);
+        setEditingTextId("pending"); // or null, just to show the editor
+        setPreviewShape(null);
+        // Do NOT create or add a text element here!
+        return;
+      }
+
+      if (tool === "rectangle" || tool === "circle") {
+        setStartX(x);
+        setStartY(y);
+        setIsDrawing(true);
+        setPreviewShape({
+          type: tool,
+          x1: x,
+          y1: y,
+          x2: x,
+          y2: y,
+          color,
+          width,
+        });
+        return;
+      }
+
+      if (tool === "eraser") {
+        setIsDrawing(true);
+        setStartX(x);
+        setStartY(y);
+        setEraserRect({ x1: x, y1: y, x2: x, y2: y });
+        return;
+      }
+
+      if (tool === "paint") {
+        // Find shape under cursor and fill it
+        const clickedElement = elements.findLast((el) => {
+          if (el.type === "rectangle") {
+            return (
+              x >= el.x &&
+              x <= el.x + el.width &&
+              y >= el.y &&
+              y <= el.y + el.height
+            );
+          } else if (el.type === "circle") {
+            const dx = x - el.x;
+            const dy = y - el.y;
+            return Math.sqrt(dx * dx + dy * dy) <= el.radius;
+          }
+          return false;
+        });
+
+        if (clickedElement) {
+          const newElement = {
+            ...clickedElement,
+            id: Date.now() + Math.random(),
+            fill: color,
+          };
+          setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+          setRedoStack([]);
+          setElements((prev) => [...prev, newElement]);
+          if (socket) {
+            socket.emit("add-element", { roomId, element: newElement });
+          }
+        }
+        return;
+      }
+
+      if (tool === "line" || tool === "arrow") {
+        setStartX(x);
+        setStartY(y);
+        setIsDrawing(true);
+        setPreviewShape({
+          type: tool,
+          x1: x,
+          y1: y,
+          x2: x,
+          y2: y,
+          color,
+          width: contextRef.current.lineWidth,
+        });
+        return;
+      }
+    };
+
+    const draw = (event) => {
+      if (!isDrawing) {
+        if (tool === "eraser") {
+          // Show eraser circle even if not drawing
+          const { x, y } = getCursorPosition(canvasRef.current, event);
+          setEraserPos({ x, y });
+        }
+        return;
+      }
+      const { x, y } = getCursorPosition(canvasRef.current, event);
+
+      if (tool === "pen") {
+        contextRef.current.lineTo(x, y);
+        contextRef.current.stroke();
+        setCurrentPath((prev) => [...prev, { x, y }]);
+        emitDrawMove(roomId, x, y);
+        return;
+      }
+
+      if (tool === "text") {
+        setPreviewShape((prev) =>
+          prev
+            ? { ...prev, x2: x, y2: y }
+            : { type: "text-area", x1: startX, y1: startY, x2: x, y2: y }
+        );
+        redrawCanvas();
+        return;
+      }
+
+      if (tool === "rectangle" || tool === "circle") {
+        setPreviewShape((prev) =>
+          prev
+            ? { ...prev, x2: x, y2: y }
+            : { type: tool, x1: startX, y1: startY, x2: x, y2: y, color, width }
+        );
+        redrawCanvas();
+        return;
+      }
+
+      if (tool === "eraser") {
+        setEraserRect((prev) =>
+          prev
+            ? { ...prev, x2: x, y2: y }
+            : { x1: startX, y1: startY, x2: x, y2: y }
+        );
+        redrawCanvas();
+        return;
+      }
+
+      if (tool === "line" || tool === "arrow") {
+        setPreviewShape((prev) => ({
+          ...prev,
+          x2: x,
+          y2: y,
+        }));
+        redrawCanvas();
+        return;
+      }
+    };
+
+    const stopDrawing = (event) => {
+      if (!isDrawing) return;
+
+      if (tool === "text") {
+        const { x, y } = getCursorPosition(canvasRef.current, event);
+        setIsDrawing(false);
+        // Calculate area
+        const x1 = startX;
+        const y1 = startY;
+        const x2 = x;
+        const y2 = y;
+        const left = Math.min(x1, x2);
+        const top = Math.min(y1, y2);
+        const widthArea = Math.abs(x2 - x1);
+        const heightArea = Math.abs(y2 - y1);
+        // Add a new text element with empty text and set it to editing
+        const id = Date.now();
+        const newTextElement = {
+          id,
+          type: "text",
+          x: left,
+          y: top,
+          width: widthArea,
+          height: heightArea,
+          text: "",
+          color,
+          fontSize: `${Math.max(14, width * 5)}px`, // Use tool width as a factor for initial font size
+          fontFamily: textFormatting.fontFamily,
+          fontStyle: textFormatting.fontStyle,
+        };
+        setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+        setRedoStack([]);
+        setElements((prev) => [...prev, newTextElement]);
+        setEditingTextId(id);
+        setPreviewShape(null);
+        if (socket) {
+          socket.emit("add-element", { roomId, element: newTextElement });
+        }
+        return;
+      }
+
+      if (tool === "rectangle" || tool === "circle") {
+        const { x, y } = getCursorPosition(canvasRef.current, event);
+        const w = x - startX;
+        const h = y - startY;
+
+        if (tool === "rectangle") {
+          const newElement = {
+            id: Date.now() + Math.random(),
+            type: "rectangle",
+            x: startX,
+            y: startY,
+            width: w,
+            height: h,
+            color,
+            lineWidth: contextRef.current.lineWidth,
+          };
+          setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+          setRedoStack([]);
+          setElements((prev) => {
+            if (socket)
+              socket.emit("add-element", { roomId, element: newElement });
+            return [...prev, newElement];
+          });
+        } else if (tool === "circle") {
+          const radius = Math.sqrt(w * w + h * h) / 2;
+          const centerX = startX + w / 2;
+          const centerY = startY + h / 2;
+
+          const newElement = {
+            id: Date.now() + Math.random(),
+            type: "circle",
+            x: centerX,
+            y: centerY,
+            radius,
+            color,
+            lineWidth: contextRef.current.lineWidth,
+          };
+          setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+          setRedoStack([]);
+          setElements((prev) => {
+            if (socket)
+              socket.emit("add-element", { roomId, element: newElement });
+            return [...prev, newElement];
+          });
+        }
+        setIsDrawing(false);
+        setPreviewShape(null);
+        return;
+      }
+
       if (tool === "eraser") {
         const { x, y } = getCursorPosition(canvasRef.current, event);
-        setEraserPos({ x, y });
+        const x1 = startX;
+        const y1 = startY;
+        const x2 = x;
+        const y2 = y;
+        const left = Math.min(x1, x2);
+        const top = Math.min(y1, y2);
+        const right = Math.max(x1, x2);
+        const bottom = Math.max(y1, y2);
+
+        // Instead of removing elements, erase only the area by drawing a white rectangle
+        const eraseElement = {
+          id: Date.now() + Math.random(),
+          type: "erase-rect",
+          x: left,
+          y: top,
+          width: right - left,
+          height: bottom - top,
+        };
+        setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+        setRedoStack([]);
+        setElements((prev) => {
+          if (socket)
+            socket.emit("add-element", { roomId, element: eraseElement });
+          return [...prev, eraseElement];
+        });
+
+        setIsDrawing(false);
+        setEraserRect(null);
+        setEraserPos(null);
+        return;
       }
-      draw(event);
-      if (tool === "rectangle" || tool === "circle" || tool === "text") {
-        redrawCanvas();
+
+      if (tool === "pen") {
+        contextRef.current.closePath();
+        emitDrawEnd(roomId);
+
+        const newElement = {
+          id: Date.now() + Math.random(), // unique id
+          type: "path",
+          color,
+          width: contextRef.current.lineWidth,
+          points: currentPath,
+        };
+        setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+        setRedoStack([]);
+        setElements((prev) => {
+          // Emit to others
+          if (socket)
+            socket.emit("add-element", { roomId, element: newElement });
+          return [...prev, newElement];
+        });
+        setCurrentPath([]);
+        setIsDrawing(false);
+        return;
+      }
+
+      if (tool === "line" || tool === "arrow") {
+        const { x, y } = getCursorPosition(canvasRef.current, event);
+        const newElement = {
+          id: Date.now() + Math.random(),
+          type: tool,
+          x1: startX,
+          y1: startY,
+          x2: x,
+          y2: y,
+          color,
+          width: contextRef.current.lineWidth,
+        };
+
+        setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+        setRedoStack([]);
+        setElements((prev) => [...prev, newElement]);
+        if (socket) {
+          socket.emit("add-element", { roomId, element: newElement });
+        }
+        setIsDrawing(false);
+        setPreviewShape(null);
+        return;
       }
     };
 
-    // Mouse leave: hide eraser preview
-    const handleMouseLeave = (event) => {
-      setEraserPos(null);
-      stopDrawing(event);
+    // Update text formatting state handler
+    const handleTextFormatting = (updates) => {
+      setTextFormatting((prev) => ({
+        ...prev,
+        ...updates,
+      }));
+
+      if (editingTextId) {
+        setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+        setRedoStack([]);
+        setElements((prev) =>
+          prev.map((el) =>
+            el.id === editingTextId ? { ...el, ...updates } : el
+          )
+        );
+      }
     };
 
     // Helper: hit test for elements for dragging
@@ -1138,8 +1072,10 @@ const Canvas = forwardRef(
       if (tool === "drag") {
         const clickedElement = hitTestElement(x, y);
         if (clickedElement) {
-          // Calculate initial offsets for smooth dragging
-          let originalX, originalY;
+          let originalX,
+            originalY,
+            originalElementX2 = 0,
+            originalElementY2 = 0;
           if (clickedElement.type === "path") {
             originalX = clickedElement.points[0].x;
             originalY = clickedElement.points[0].y;
@@ -1149,6 +1085,8 @@ const Canvas = forwardRef(
           ) {
             originalX = clickedElement.x1;
             originalY = clickedElement.y1;
+            originalElementX2 = clickedElement.x2;
+            originalElementY2 = clickedElement.y2;
           } else {
             originalX = clickedElement.x;
             originalY = clickedElement.y;
@@ -1157,12 +1095,16 @@ const Canvas = forwardRef(
           setDragging({
             isDragging: true,
             elementId: clickedElement.id,
-            initialMouseX: x, // Store the mouse position at start of drag
+            initialMouseX: x,
             initialMouseY: y,
-            originalElementX: originalX, // Store the element's original position
+            originalElementX: originalX,
             originalElementY: originalY,
+            originalElementX2, // <-- set here
+            originalElementY2,
           });
           // Bring the dragged element to the top
+          setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+          setRedoStack([]);
           setElements((prev) => {
             const idx = prev.findIndex((e) => e.id === clickedElement.id);
             if (idx === -1) return prev;
@@ -1185,9 +1127,11 @@ const Canvas = forwardRef(
 
       // Drag logic
       if (dragging.isDragging && dragging.elementId) {
-        const dx = x - dragging.initialMouseX; // Delta X from initial click
-        const dy = y - dragging.initialMouseY; // Delta Y from initial click
+        const dx = x - dragging.initialMouseX;
+        const dy = y - dragging.initialMouseY;
 
+        setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+        setRedoStack([]);
         setElements((prev) =>
           prev.map((el) => {
             if (el.id !== dragging.elementId) return el;
@@ -1203,7 +1147,6 @@ const Canvas = forwardRef(
                 y: dragging.originalElementY + dy,
               };
             } else if (el.type === "path") {
-              // FIXED: Calculate the offset once and apply to all points consistently
               const offsetX = dragging.originalElementX + dx - el.points[0].x;
               const offsetY = dragging.originalElementY + dy - el.points[0].y;
 
@@ -1215,12 +1158,13 @@ const Canvas = forwardRef(
                 })),
               };
             } else if (el.type === "line" || el.type === "arrow") {
+              // Use the correct property names for both endpoints
               return {
                 ...el,
                 x1: dragging.originalElementX + dx,
                 y1: dragging.originalElementY + dy,
-                x2: el.x2 + dx, // x2, y2 also need to be shifted by the same amount
-                y2: el.y2 + dy,
+                x2: dragging.originalElementX2 + dx,
+                y2: dragging.originalElementY2 + dy,
               };
             }
             return el;
@@ -1250,6 +1194,8 @@ const Canvas = forwardRef(
           initialMouseY: 0,
           originalElementX: 0,
           originalElementY: 0,
+          originalElementX2: 0,
+          originalElementY2: 0,
         });
         // Emit updated element position to other clients
         const updatedElement = elements.find(
@@ -1274,6 +1220,8 @@ const Canvas = forwardRef(
           initialMouseY: 0,
           originalElementX: 0,
           originalElementY: 0,
+          originalElementX2: 0,
+          originalElementY2: 0,
         });
         // Emit updated element position if it was dragged
         const updatedElement = elements.find(
@@ -1420,8 +1368,11 @@ const Canvas = forwardRef(
 
             <textarea
               autoFocus
-              value={elements.find((e) => e.id === editingTextId)?.text || ""}
+              value={pendingText}
               onChange={(e) => {
+                setPendingText(e.target.value);
+                setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+                setRedoStack([]);
                 setElements((prev) =>
                   prev.map((el) =>
                     el.id === editingTextId
@@ -1458,24 +1409,52 @@ const Canvas = forwardRef(
                 boxShadow: "inset 0 1px 3px rgba(0,0,0,0.05)",
               }}
             />
+            <button
+              style={{
+                marginTop: "8px",
+                padding: "8px 16px",
+                background: "#1976d2",
+                color: "#fff",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontWeight: "bold",
+                fontSize: "16px",
+                alignSelf: "flex-end",
+              }}
+              onClick={() => {
+                setEditingTextId(null);
+                if (pendingText.trim()) {
+                  const id = Date.now();
+                  const newTextElement = {
+                    id,
+                    type: "text",
+                    x: startX,
+                    y: startY,
+                    width: 100, // Set a default width or calculate based on content
+                    height: 50, // Set a default height or calculate based on content
+                    text: pendingText,
+                    color,
+                    fontSize: `${Math.max(14, width * 5)}px`, // Use tool width as a factor for initial font size
+                    fontFamily: textFormatting.fontFamily,
+                    fontStyle: textFormatting.fontStyle,
+                  };
+                  setUndoStack((prevUndoStack) => [...prevUndoStack, elements]);
+                  setRedoStack([]);
+                  setElements((prev) => [...prev, newTextElement]);
+                  if (socket) {
+                    socket.emit("add-element", {
+                      roomId,
+                      element: newTextElement,
+                    });
+                  }
+                  setPendingText(""); // Clear the input after saving
+                }
+              }}
+            >
+              Done
+            </button>
           </div>
-        )}
-        {/* Eraser preview */}
-        {eraserPos && tool === "eraser" && (
-          <Box
-            sx={{
-              position: "absolute",
-              left: eraserPos.x - ERASER_RADIUS,
-              top: eraserPos.y - ERASER_RADIUS,
-              width: ERASER_RADIUS * 2,
-              height: ERASER_RADIUS * 2,
-              border: "2px dashed #888",
-              borderRadius: "50%",
-              pointerEvents: "none",
-              zIndex: 20,
-              background: "transparent", // outlined only, no fill
-            }}
-          />
         )}
       </Box>
     );

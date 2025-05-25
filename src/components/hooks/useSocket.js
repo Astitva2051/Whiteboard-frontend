@@ -1,4 +1,4 @@
-import { useContext, useEffect, useCallback } from "react";
+import { useContext, useCallback } from "react";
 import { SocketContext } from "../context/SocketContext";
 
 // Custom hook to access socket context and set up event listeners

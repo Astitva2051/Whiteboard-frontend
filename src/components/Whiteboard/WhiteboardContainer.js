@@ -44,8 +44,14 @@ const WhiteboardContainer = () => {
   const { roomId } = useParams();
   const navigate = useNavigate();
   const { currentUser } = useAuth();
-  const { socket, connected, joinRoom, leaveRoom, roomUsers, onEvent } =
-    useSocket();
+  const {
+    socket,
+    connected,
+    joinRoom: joinRoomRaw,
+    leaveRoom: leaveRoomRaw,
+    roomUsers,
+    onEvent,
+  } = useSocket();
 
   // State for room and whiteboard data
   const [room, setRoom] = useState(null);
@@ -79,21 +85,42 @@ const WhiteboardContainer = () => {
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
 
+  // Fetch room and whiteboard data
+  const fetchRoomAndWhiteboard = React.useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      await roomAPI.joinRoom(roomId);
+      const roomResponse = await roomAPI.getRoom(roomId);
+      setRoom(roomResponse.data.data);
+      const whiteboardResponse = await whiteboardAPI.getWhiteboard(roomId);
+      setWhiteboard(whiteboardResponse.data.data);
+    } catch (err) {
+      console.error("Error fetching room data:", err);
+      setError(err?.response?.data?.message || "Failed to load whiteboard");
+    } finally {
+      setLoading(false);
+    }
+  }, [roomId]);
+
   // Initialize room data
   useEffect(() => {
     fetchRoomAndWhiteboard();
-  }, [roomId]);
+  }, [fetchRoomAndWhiteboard]);
 
-  // Join socket room when connected
+  // Join socket room when connected (fix repeated join/leave)
   useEffect(() => {
-    if (connected && roomId) {
-      joinRoom(roomId);
+    if (!connected || !roomId) return;
+    joinRoomRaw(roomId);
 
-      // Clean up - leave room when component unmounts
-      return () => {
-        leaveRoom(roomId);
-      };
-    }
+    // Clean up - leave room when component unmounts
+    return () => {
+      leaveRoomRaw(roomId);
+    };
+    // Only depend on connected and roomId to avoid repeated join/leave
+    // DO NOT add joinRoomRaw/leaveRoomRaw to dependencies!
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, roomId]);
 
   // Set up socket event listeners
@@ -113,17 +140,18 @@ const WhiteboardContainer = () => {
     // New chat message
     const receiveMessageCleanup = onEvent("receive-message", (data) => {
       setMessages((prev) => [...prev, data]);
-      if (data.userId !== currentUser?.id) {
+
+      if (data.userId !== currentUser?._id) {
         showAlert(`New message from ${data.username}`, "info");
       }
     });
 
     // Clear board event
     const clearBoardCleanup = onEvent("clear-board", (data) => {
-      if (data.userId !== currentUser?.id) {
+      if (data.userId !== currentUser?._id) {
         if (canvasRef?.current?.clearCanvas) {
           canvasRef.current.clearCanvas();
-          showAlert("Whiteboard was cleared by another user", "info");
+          showAlert(`Whiteboard was cleared by user: ${data.username}`, "info");
         }
       }
     });
@@ -137,25 +165,6 @@ const WhiteboardContainer = () => {
     // Only depend on socket and currentUser?.id
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, currentUser?.id]);
-
-  // Fetch room and whiteboard data
-  const fetchRoomAndWhiteboard = async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      await roomAPI.joinRoom(roomId);
-      const roomResponse = await roomAPI.getRoom(roomId);
-      setRoom(roomResponse.data.data);
-      const whiteboardResponse = await whiteboardAPI.getWhiteboard(roomId);
-      setWhiteboard(whiteboardResponse.data.data);
-    } catch (err) {
-      console.error("Error fetching room data:", err);
-      setError(err?.response?.data?.message || "Failed to load whiteboard");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // Save whiteboard
   const handleSaveWhiteboard = async () => {
@@ -185,7 +194,7 @@ const WhiteboardContainer = () => {
   // Leave room
   const handleLeaveRoom = async () => {
     try {
-      leaveRoom(roomId);
+      // Only call leaveRoom API, not socket leaveRoom, since cleanup will handle socket leave
       await roomAPI.leaveRoom(roomId);
       navigate("/dashboard");
     } catch (err) {
@@ -204,7 +213,6 @@ const WhiteboardContainer = () => {
     if (!canvasRef?.current) return;
 
     const canvas = canvasRef.current.getCanvas(); // Add method to get canvas element
-    const context = canvas.getContext("2d");
 
     // Store current canvas content
     const tempCanvas = document.createElement("canvas");
@@ -331,7 +339,12 @@ const WhiteboardContainer = () => {
             <Tooltip title="Users in Room">
               <IconButton
                 color="inherit"
-                onClick={() => setUserListOpen(true)}
+                onClick={() => {
+                  if (socket && socket.emit) {
+                    socket.emit("room-users", { roomId });
+                  }
+                  setUserListOpen(true);
+                }}
                 sx={{ mr: 1 }}
               >
                 <PeopleIcon />
@@ -592,64 +605,66 @@ const WhiteboardContainer = () => {
                 </Typography>
               </ListItem>
             ) : (
-              roomUsers.map((user) => (
-                <ListItem
-                  key={user.id}
-                  sx={{
-                    mb: 1,
-                    borderRadius: 1,
-                    bgcolor:
-                      user.id === currentUser.id
-                        ? "primary.light"
-                        : "background.paper",
-                    transition: "all 0.2s ease",
-                    "&:hover": {
+              <>
+                {roomUsers.map((user) => (
+                  <ListItem
+                    key={user.id}
+                    sx={{
+                      mb: 1,
+                      borderRadius: 1,
                       bgcolor:
                         user.id === currentUser.id
                           ? "primary.light"
-                          : "action.hover",
-                    },
-                    boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
-                  }}
-                >
-                  <Avatar
-                    sx={{
-                      mr: 2,
-                      bgcolor:
-                        user.id === currentUser.id
-                          ? "primary.main"
-                          : "secondary.main",
-                      color: "white",
-                      fontWeight: "bold",
+                          : "background.paper",
+                      transition: "all 0.2s ease",
+                      "&:hover": {
+                        bgcolor:
+                          user.id === currentUser.id
+                            ? "primary.light"
+                            : "action.hover",
+                      },
+                      boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
                     }}
                   >
-                    {user.username.charAt(0).toUpperCase()}
-                  </Avatar>
-                  <Box sx={{ display: "flex", flexDirection: "column" }}>
-                    <Typography
-                      variant="subtitle1"
+                    <Avatar
                       sx={{
-                        fontWeight: user.id === currentUser.id ? 600 : 400,
-                        color:
+                        mr: 2,
+                        bgcolor:
                           user.id === currentUser.id
-                            ? "primary.dark"
-                            : "text.primary",
+                            ? "primary.main"
+                            : "secondary.main",
+                        color: "white",
+                        fontWeight: "bold",
                       }}
                     >
-                      {user.username}
-                    </Typography>
-                    {user.id === currentUser.id && (
+                      {user.username.charAt(0).toUpperCase()}
+                    </Avatar>
+                    <Box sx={{ display: "flex", flexDirection: "column" }}>
                       <Typography
-                        variant="caption"
-                        color="primary"
-                        sx={{ fontWeight: 500 }}
+                        variant="subtitle1"
+                        sx={{
+                          fontWeight: user.id === currentUser.id ? 600 : 400,
+                          color:
+                            user.id === currentUser.id
+                              ? "primary.dark"
+                              : "text.primary",
+                        }}
                       >
-                        You
+                        {user.username}
                       </Typography>
-                    )}
-                  </Box>
-                </ListItem>
-              ))
+                      {user.id === currentUser.id && (
+                        <Typography
+                          variant="caption"
+                          color="primary"
+                          sx={{ fontWeight: 500 }}
+                        >
+                          You
+                        </Typography>
+                      )}
+                    </Box>
+                  </ListItem>
+                ))}
+              </>
             )}
           </List>
         </DialogContent>

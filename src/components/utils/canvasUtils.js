@@ -133,30 +133,6 @@ export const drawCircle = (
 };
 
 /**
- * Draw text on canvas
- * @param {CanvasRenderingContext2D} ctx - Canvas context
- * @param {string} text - Text to draw
- * @param {number} x - x-coordinate
- * @param {number} y - y-coordinate
- * @param {string} color - Text color
- * @param {string} fontSize - Font size with unit (e.g., '16px')
- * @param {string} fontFamily - Font family
- */
-export const drawText = (
-  ctx,
-  text,
-  x,
-  y,
-  color,
-  fontSize,
-  fontFamily = "Arial"
-) => {
-  ctx.font = `${fontSize} ${fontFamily}`;
-  ctx.fillStyle = color;
-  ctx.fillText(text, x, y);
-};
-
-/**
  * Convert canvas to data URL
  * @param {HTMLCanvasElement} canvas - Canvas element
  * @returns {string} - Data URL

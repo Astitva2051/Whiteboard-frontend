@@ -96,13 +96,6 @@ export const SocketProvider = ({ children }) => {
     }
   };
 
-  // Add text
-  const emitAddText = (roomId, text, x, y, fontSize, color) => {
-    if (socket && connected) {
-      socket.emit("add-text", { roomId, text, x, y, fontSize, color });
-    }
-  };
-
   // Add shape
   const emitAddShape = (roomId, type, x, y, width, height, color) => {
     if (socket && connected) {
@@ -114,6 +107,13 @@ export const SocketProvider = ({ children }) => {
   const emitClearBoard = (roomId) => {
     if (socket && connected) {
       socket.emit("clear-board", { roomId });
+    }
+  };
+
+  // Emit full elements array (for undo/redo sync)
+  const emitSyncElements = (roomId, elements) => {
+    if (socket && connected) {
+      socket.emit("sync-elements", { roomId, elements });
     }
   };
 
@@ -135,10 +135,10 @@ export const SocketProvider = ({ children }) => {
         emitDrawStart,
         emitDrawMove,
         emitDrawEnd,
-        emitAddText,
         emitAddShape,
         emitClearBoard,
         sendMessage,
+        emitSyncElements,
       }}
     >
       {children}

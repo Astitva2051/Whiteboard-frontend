@@ -5,10 +5,8 @@ import {
   Typography,
   TextField,
   IconButton,
-  Divider,
   List,
   ListItem,
-  ListItemText,
   Avatar,
 } from "@mui/material";
 import SendIcon from "@mui/icons-material/Send";
