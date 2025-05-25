@@ -94,7 +94,7 @@ const ChatBox = ({ roomId, messages, onClose }) => {
           ) : (
             <List sx={{ p: 0 }}>
               {messages.map((msg, index) => {
-                const isCurrentUser = msg.userId === currentUser.id;
+                const isCurrentUser = msg.userId === currentUser._id;
                 return (
                   <ListItem
                     key={index}

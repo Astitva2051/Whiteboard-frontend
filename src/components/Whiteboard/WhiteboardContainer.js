@@ -132,6 +132,11 @@ const WhiteboardContainer = () => {
       showAlert(`${data.username} joined the room`, "info");
     });
 
+    const ChatHistoryCleanup = onEvent("message-history", (data) => {
+      console.log("Chat history received:", data);
+      setMessages(data || []);
+    });
+
     // User disconnected from room
     const userDisconnectedCleanup = onEvent("user-disconnected", (data) => {
       showAlert(`${data.username} left the room`, "info");
@@ -139,6 +144,7 @@ const WhiteboardContainer = () => {
 
     // New chat message
     const receiveMessageCleanup = onEvent("receive-message", (data) => {
+      console.log("New message received:", data);
       setMessages((prev) => [...prev, data]);
 
       if (data.userId !== currentUser?._id) {
@@ -161,6 +167,7 @@ const WhiteboardContainer = () => {
       userDisconnectedCleanup();
       receiveMessageCleanup();
       clearBoardCleanup();
+      ChatHistoryCleanup();
     };
     // Only depend on socket and currentUser?.id
     // eslint-disable-next-line react-hooks/exhaustive-deps

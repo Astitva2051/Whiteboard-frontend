@@ -1297,8 +1297,8 @@ const Canvas = forwardRef(
           <div
             style={{
               position: "absolute",
-              left: elements.find((e) => e.id === editingTextId)?.x || 0,
-              top: elements.find((e) => e.id === editingTextId)?.y || 0,
+              left: startX,
+              top: startY,
               display: "flex",
               flexDirection: "column",
               gap: "8px",
