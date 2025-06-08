@@ -14,7 +14,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import EnterIcon from "@mui/icons-material/Login";
 
-const RoomCard = ({ room, onDelete, onJoin }) => {
+const RoomCard = ({ room, onDelete, onJoin, currentUser }) => {
   const handleCopyRoomId = () => {
     navigator.clipboard.writeText(room.roomId);
   };
@@ -37,7 +37,7 @@ const RoomCard = ({ room, onDelete, onJoin }) => {
             {room.name}
           </Typography>
 
-          {room.createdBy && room.createdBy._id === room.participants[0] && (
+          {room.createdBy && room.createdBy.username === currentUser && (
             <Tooltip title="Delete Room">
               <IconButton
                 size="small"

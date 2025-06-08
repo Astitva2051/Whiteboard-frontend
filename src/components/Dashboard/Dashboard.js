@@ -22,6 +22,8 @@ import Loading from "../common/Loading";
 
 const Dashboard = () => {
   const navigate = useNavigate();
+
+  // Get current user from auth context
   const { currentUser } = useAuth();
 
   const [rooms, setRooms] = useState([]);
@@ -207,6 +209,7 @@ const Dashboard = () => {
                 room={room}
                 onDelete={() => handleDeleteRoom(room._id)}
                 onJoin={() => navigate(`/room/${room.roomId}`)}
+                currentUserna={currentUser}
               />
             </Grid>
           ))}
