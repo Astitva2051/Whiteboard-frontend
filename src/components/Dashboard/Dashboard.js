@@ -209,7 +209,7 @@ const Dashboard = () => {
                 room={room}
                 onDelete={() => handleDeleteRoom(room._id)}
                 onJoin={() => navigate(`/room/${room.roomId}`)}
-                currentUserna={currentUser}
+                currentUser={currentUser}
               />
             </Grid>
           ))}
