@@ -19,6 +19,8 @@ const RoomCard = ({ room, onDelete, onJoin, currentUser }) => {
     navigator.clipboard.writeText(room.roomId);
   };
 
+  console.log("room data : ", room);
+
   return (
     <Card
       variant="outlined"
@@ -37,13 +39,9 @@ const RoomCard = ({ room, onDelete, onJoin, currentUser }) => {
             {room.name}
           </Typography>
 
-          {room.createdBy && room.createdBy.username === currentUser && (
+          {room.createdBy?._id === currentUser?._id && (
             <Tooltip title="Delete Room">
-              <IconButton
-                size="small"
-                color="error"
-                onClick={() => onDelete(room._id)}
-              >
+              <IconButton size="small" color="error" onClick={() => onDelete()}>
                 <DeleteIcon />
               </IconButton>
             </Tooltip>

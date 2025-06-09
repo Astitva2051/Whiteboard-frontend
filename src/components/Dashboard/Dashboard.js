@@ -114,7 +114,7 @@ const Dashboard = () => {
   const handleDeleteRoom = async (roomId) => {
     try {
       await roomAPI.deleteRoom(roomId);
-      setRooms(rooms.filter((room) => room._id !== roomId));
+      setRooms(rooms.filter((room) => room.roomId !== roomId));
     } catch (err) {
       setError(err.response?.data?.message || "Failed to delete room");
     }
@@ -207,7 +207,7 @@ const Dashboard = () => {
             <Grid item key={room._id} xs={12} sm={6} md={4}>
               <RoomCard
                 room={room}
-                onDelete={() => handleDeleteRoom(room._id)}
+                onDelete={() => handleDeleteRoom(room.roomId)}
                 onJoin={() => navigate(`/room/${room.roomId}`)}
                 currentUser={currentUser}
               />
